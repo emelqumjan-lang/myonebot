@@ -52,7 +52,22 @@ def handle_any_link(message):
     status_msg = bot.send_message(chat_id, "🔍 *Анализирую ссылку...*", parse_mode='Markdown')
 
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl:
+        # Улучшенные настройки для обхода защиты YouTube
+        ydl_opts = {
+            'quiet': True,
+            'noplaylist': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            # Прикидываемся обычным браузером
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'add_header': [
+                'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language: en-US,en;q=0.5',
+            ],
+            'referer': 'https://www.google.com/',
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
             title = info.get('title', 'Без названия')
@@ -88,7 +103,8 @@ def handle_any_link(message):
         )
 
     except Exception as e:
-        bot.edit_message_text("❌ *Ошибка:* Не удалось проанализировать ссылку. Возможно, сайт защищен.", chat_id=chat_id, message_id=status_msg.message_id, parse_mode='Markdown')
+        # Если снова ошибка, бот выведет её текст в консоль Render (Logs)
+        bot.edit_message_text("❌ *Ошибка:* YouTube блокирует доступ. Проверь логи сервера.", chat_id=chat_id, message_id=status_msg.message_id, parse_mode='Markdown')
         print(f"Ошибка парсинга: {e}")
 
 # ---------------------------------------------------------
