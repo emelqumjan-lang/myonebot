@@ -13,7 +13,6 @@ def home():
     return "Я жив!"
 
 def run():
-    # Render использует порт 8080 по умолчанию
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
@@ -21,12 +20,25 @@ def keep_alive():
     t.start()
 
 # --- НАСТРОЙКИ БОТА ---
-# os.getenv вытащит токен из настроек Render, чтобы его не украли с GitHub
 TOKEN = os.getenv('BOT_TOKEN') 
 bot = telebot.TeleBot(TOKEN)
 
-# Словарь для памяти бота
+# СБРОС СТАРЫХ СОЕДИНЕНИЙ (Защита от ошибки 409 Conflict)
+try:
+    bot.remove_webhook(drop_pending_updates=True)
+except:
+    pass
+
 user_data = {}
+
+# Общие настройки для yt-dlp (Cookies + User-Agent)
+YDL_COMMON_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'nocheckcertificate': True,
+    'cookiefile': 'cookies.txt',  # Убедись, что загрузил этот файл на GitHub
+    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+}
 
 # ---------------------------------------------------------
 # ПРИВЕТСТВИЕ
@@ -35,15 +47,15 @@ user_data = {}
 def send_welcome(message):
     text = (
         "👋 *Привет!*\n\n"
-        "Просто отправь мне ссылку на видео или трек (YouTube, TikTok, Instagram, VK и сотни других сайтов).\n\n"
-        "Я быстро всё проанализирую и предложу тебе выбрать нужный формат и качество для скачивания 📥"
+        "Просто отправь мне ссылку на видео или трек.\n\n"
+        "Я использую Cookies для обхода защиты YouTube 🍪"
     )
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 # ---------------------------------------------------------
 # ЛОВЕЦ ССЫЛОК И АНАЛИЗАТОР
 # ---------------------------------------------------------
-@bot.message_handler(func=lambda message: "http://" in message.text or "https://" in message.text)
+@bot.message_handler(func=lambda message: "http" in message.text)
 def handle_any_link(message):
     url = message.text
     chat_id = message.chat.id
@@ -52,20 +64,8 @@ def handle_any_link(message):
     status_msg = bot.send_message(chat_id, "🔍 *Анализирую ссылку...*", parse_mode='Markdown')
 
     try:
-        # Улучшенные настройки для обхода защиты YouTube
-        ydl_opts = {
-            'quiet': True,
-            'noplaylist': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            # Прикидываемся обычным браузером
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'add_header': [
-                'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language: en-US,en;q=0.5',
-            ],
-            'referer': 'https://www.google.com/',
-        }
+        ydl_opts = YDL_COMMON_OPTS.copy()
+        ydl_opts.update({'noplaylist': True})
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -103,8 +103,7 @@ def handle_any_link(message):
         )
 
     except Exception as e:
-        # Если снова ошибка, бот выведет её текст в консоль Render (Logs)
-        bot.edit_message_text("❌ *Ошибка:* YouTube блокирует доступ. Проверь логи сервера.", chat_id=chat_id, message_id=status_msg.message_id, parse_mode='Markdown')
+        bot.edit_message_text(f"❌ *Ошибка:* YouTube блокирует доступ или ссылка битая.\n`{str(e)[:100]}`", chat_id=chat_id, message_id=status_msg.message_id, parse_mode='Markdown')
         print(f"Ошибка парсинга: {e}")
 
 # ---------------------------------------------------------
@@ -118,20 +117,17 @@ def handle_download_callback(call):
     if action == "dl_cancel":
         bot.delete_message(chat_id, call.message.message_id)
         if chat_id in user_data:
-            try: bot.delete_message(chat_id, user_data[chat_id]['msg_id'])
-            except: pass
             del user_data[chat_id]
         return
 
     if chat_id not in user_data:
-        bot.answer_callback_query(call.id, "Ссылка устарела. Отправь заново.")
-        bot.delete_message(chat_id, call.message.message_id)
+        bot.answer_callback_query(call.id, "Ссылка устарела.")
         return
 
     url = user_data[chat_id]['url']
     user_msg_id = user_data[chat_id]['msg_id']
     
-    bot.edit_message_text("⏳ *Качаю и собираю файл...*", chat_id=chat_id, message_id=call.message.message_id, parse_mode='Markdown')
+    bot.edit_message_text("⏳ *Качаю файл...*", chat_id=chat_id, message_id=call.message.message_id, parse_mode='Markdown')
     
     process_download(chat_id, url, action, user_msg_id, call.message.message_id)
 
@@ -143,21 +139,22 @@ def process_download(chat_id, url, action, user_msg_id, status_msg_id):
     abs_temp_folder = os.path.abspath(temp_folder)
     os.makedirs(abs_temp_folder, exist_ok=True)
 
+    ydl_opts = YDL_COMMON_OPTS.copy()
+    
     if action == "dl_mp3":
-        ydl_opts = {
+        ydl_opts.update({
             'format': 'bestaudio/best',
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}],
             'outtmpl': f'{abs_temp_folder}/%(title)s.%(ext)s',
-        }
+        })
     else:
         res = action.split('_')[1]
-        ydl_opts = {
+        ydl_opts.update({
             'format': f'bestvideo[height<={res}][ext=mp4]+bestaudio[ext=m4a]/best[height<={res}][ext=mp4]/best',
             'merge_output_format': 'mp4',
             'outtmpl': f'{abs_temp_folder}/%(title)s_({res}p).%(ext)s',
-        }
+        })
 
-    ydl_opts.update({'noplaylist': True, 'quiet': True, 'no_warnings': True})
     file_path = None
 
     try:
@@ -165,7 +162,7 @@ def process_download(chat_id, url, action, user_msg_id, status_msg_id):
             info = ydl.extract_info(url, download=True)
             expected_title = info.get('title', '')
             for f in os.listdir(abs_temp_folder):
-                if expected_title in f or info['id'] in f:
+                if expected_title in f or info.get('id') in f:
                     file_path = os.path.join(abs_temp_folder, f)
                     break
             
@@ -174,14 +171,11 @@ def process_download(chat_id, url, action, user_msg_id, status_msg_id):
 
         file_size = os.path.getsize(file_path)
         
-        if file_size > 52428800: # Лимит 50 МБ
-            size_mb = round(file_size / 1024 / 1024, 1)
-            msg = (f"⚠️ *Файл слишком большой!* ({size_mb} МБ)\n\n"
-                   f"Лимит — 50 МБ. Я сохранил его в папку `downloads` на сервере.")
-            bot.edit_message_text(msg, chat_id=chat_id, message_id=status_msg_id, parse_mode='Markdown')
+        if file_size > 52428800:
+            bot.edit_message_text(f"⚠️ *Файл слишком большой!* ({round(file_size/1048576, 1)} МБ)", chat_id=chat_id, message_id=status_msg_id, parse_mode='Markdown')
             return
 
-        bot.edit_message_text("✅ *Отправляю в чат...*", chat_id=chat_id, message_id=status_msg_id, parse_mode='Markdown')
+        bot.edit_message_text("✅ *Отправляю...*", chat_id=chat_id, message_id=status_msg_id, parse_mode='Markdown')
 
         with open(file_path, 'rb') as f:
             if action == "dl_mp3":
@@ -190,7 +184,6 @@ def process_download(chat_id, url, action, user_msg_id, status_msg_id):
                 bot.send_video(chat_id, f, caption=f"🎬 {info.get('title')}")
 
         try:
-            bot.delete_message(chat_id, user_msg_id)
             bot.delete_message(chat_id, status_msg_id)
         except: pass
         
@@ -205,7 +198,6 @@ def process_download(chat_id, url, action, user_msg_id, status_msg_id):
             del user_data[chat_id]
 
 if __name__ == '__main__':
-    # Запускаем Flask в отдельном потоке
     keep_alive()
     print("🤖 БОТ ЗАПУЩЕН!")
     bot.infinity_polling()
